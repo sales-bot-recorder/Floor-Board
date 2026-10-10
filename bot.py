@@ -1,3 +1,5 @@
+
+bot.py
 """
 Floor board. Submitted and issued are separate.
 Source of truth is GoHighLevel. Discord only displays.
@@ -70,14 +72,16 @@ def money(n: float) -> str:
 
 def stage_of(name: str) -> str | None:
     n = (name or "").strip().lower()
-    if n in {"issued", "placed", "in force", "paid"}:
-        return "issued"
-    if n in {"submitted", "app submitted", "application submitted", "pending"}:
-        return "submitted"
-    if n in {"not taken", "not-taken", "declined", "withdrawn", "incomplete"}:
-        return "not_taken"
+    if not n:
+        return None
     if "chargeback" in n or n in {"lapsed", "cancelled", "canceled"}:
         return "chargeback"
+    if "not taken" in n or "not-taken" in n or n in {"declined", "withdrawn", "incomplete"}:
+        return "not_taken"
+    if "issued" in n or n in {"placed", "in force", "paid"}:
+        return "issued"
+    if "submitted" in n or "pending" in n:
+        return "submitted"
     return None
 
 
@@ -748,10 +752,13 @@ async def loop_sync() -> None:
 
 async def handle_ghl(request: web.Request) -> web.Response:
     if WEBHOOK_SECRET and request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
+        print("webhook rejected: bad secret")
         return web.Response(status=401, text="bad secret")
     body = await request.json()
+    print("webhook", json.dumps(body)[:500])
     parsed = deal_from_ghl(body)
     if not parsed or not parsed.get("agent"):
+        print("webhook ignored", body.get("customData"))
         return web.json_response({"ok": False, "reason": "stage not tracked"})
     event = await upsert_deal(parsed)
     await announce(event, parsed)
