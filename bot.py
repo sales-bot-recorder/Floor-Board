@@ -275,45 +275,12 @@ async def import_deals(rows: list[dict]) -> None:
     await conn.close()
 
 
-async def ledger_message(channel):
-    async for msg in channel.history(limit=50):
-        if msg.author == bot.user and msg.content.startswith("FLOOR-LEDGER"):
-            return msg
-    return None
-
-
 async def save_ledger() -> None:
-    if not CHANNEL_ID or not bot.is_ready():
-        return
-    try:
-        channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
-        payload = json.dumps(await export_deals()).encode()
-        msg = await ledger_message(channel)
-        file = discord.File(fp=__import__("io").BytesIO(payload), filename="deals.json")
-        if msg:
-            await msg.edit(content=f"FLOOR-LEDGER {len(payload)}", attachments=[file])
-        else:
-            await channel.send(content="FLOOR-LEDGER", file=file)
-    except Exception as exc:
-        print("ledger save failed", exc)
+    return
 
 
 async def restore_ledger() -> None:
-    if not CHANNEL_ID:
-        return
-    existing = await export_deals()
-    if existing:
-        return
-    try:
-        channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
-        msg = await ledger_message(channel)
-        if not msg or not msg.attachments:
-            return
-        raw = await msg.attachments[0].read()
-        await import_deals(json.loads(raw.decode()))
-        print("restored", len(json.loads(raw.decode())), "deals")
-    except Exception as exc:
-        print("ledger restore failed", exc)
+    return
 
 
 async def ranks(status: str, since: datetime) -> list[dict]:
@@ -885,6 +852,7 @@ async def handle_ghl(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "reason": "stage not tracked"})
     async with webhook_lock:
         try:
+            await restore_ledger()
             event = await upsert_deal(parsed)
             await announce(event, parsed)
             await push_board()
@@ -1002,4 +970,3 @@ if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set DISCORD_TOKEN in .env")
     bot.run(TOKEN)
-
