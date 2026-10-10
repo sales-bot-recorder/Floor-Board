@@ -1,5 +1,3 @@
-
-bot.py
 """
 Floor board. Submitted and issued are separate.
 Source of truth is GoHighLevel. Discord only displays.
@@ -496,7 +494,7 @@ async def push_board() -> None:
             cur = await conn.execute("SELECT value FROM meta WHERE key = ?", (meta_key,))
             row = await cur.fetchone()
             embed = boards[key]
-            file = discord.File("banner.jpg", filename="banner.jpg") if key == "master" else None
+            file = discord.File("banner.jpg", filename="banner.jpg") if key == "master" and os.path.exists("banner.jpg") else None
             msg = None
             if row:
                 try:
@@ -506,6 +504,9 @@ async def push_board() -> None:
                     else:
                         await msg.edit(embed=embed)
                 except discord.NotFound:
+                    msg = None
+                except Exception as exc:
+                    print("board edit failed", key, exc)
                     msg = None
             if msg is None:
                 msg = await channel.send(embed=embed, file=file) if file else await channel.send(embed=embed)
