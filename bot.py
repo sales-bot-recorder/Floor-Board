@@ -1,4 +1,4 @@
-"""
+PK�J]tp��`�`bot.py"""
 Floor board. Submitted and issued are separate.
 Source of truth is GoHighLevel. Discord only displays.
 
@@ -649,11 +649,22 @@ async def cmd_issued(interaction: discord.Interaction, client: str, agent: str) 
     await interaction.response.send_message(f"Issued {client} · {agent}", ephemeral=True)
 
 
-@tree.command(name="link", description="Link your Discord to your board name so sales ping you")
-@app_commands.describe(name="Your name exactly as it shows on the board")
-async def cmd_link(interaction: discord.Interaction, name: str) -> None:
-    await upsert_agent(name, discord_id=str(interaction.user.id))
-    await interaction.response.send_message(f"Linked {name} to you. Sales will ping you.", ephemeral=True)
+@tree.command(name="link", description="Link a Discord user to a board name so sales ping them")
+@app_commands.describe(
+    name="Name exactly as it shows on the board",
+    user="The agent. Leave blank to link yourself.",
+)
+async def cmd_link(
+    interaction: discord.Interaction,
+    name: str,
+    user: discord.Member | None = None,
+) -> None:
+    target = user or interaction.user
+    await upsert_agent(name, discord_id=str(target.id))
+    await interaction.response.send_message(
+        f"Linked {name} to {target.mention}. Sales will ping them.",
+        ephemeral=True,
+    )
 
 
 @bot.event
@@ -674,3 +685,4 @@ if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set DISCORD_TOKEN in .env")
     bot.run(TOKEN)
+PK�J]tp��`�`��bot.pyPK4�`
