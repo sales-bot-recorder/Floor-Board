@@ -1,7 +1,3 @@
-
-bot.py
-
-Files
 """
 Floor board. Submitted and issued are separate.
 Source of truth is GoHighLevel. Discord only displays.
@@ -857,4 +853,3 @@ if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set DISCORD_TOKEN in .env")
     bot.run(TOKEN)
-
