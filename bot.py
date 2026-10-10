@@ -329,59 +329,155 @@ async def totals(since: datetime) -> dict:
     return row
 
 
-def money_pair(sub: float, iss: float) -> str:
-    return f"{money(sub or 0)} sub  ·  {money(iss or 0)} iss"
-
-
-def window_block(label: str, row: dict) -> str:
-    return (
-        f"**{label}**\n"
-        f"Submitted  {money(row['submitted_prem'] or 0)}\n"
-        f"Issued  {money(row['issued_prem'] or 0)}"
+async def period_people(since: datetime) -> list[dict]:
+    conn = await db()
+    cur = await conn.execute(
+        """
+        SELECT agent,
+          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS iss,
+          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN 1 ELSE 0 END), 0) AS sub_apps,
+          COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN 1 ELSE 0 END), 0) AS iss_apps
+        FROM deals
+        WHERE status IN ('submitted', 'issued')
+        GROUP BY agent
+        HAVING sub > 0 OR iss > 0
+        ORDER BY iss DESC, sub DESC
+        LIMIT 10
+        """,
+        (since.isoformat(), since.isoformat(), since.isoformat(), since.isoformat()),
     )
+    rows = [dict(r) for r in await cur.fetchall()]
+    await conn.close()
+    return rows
 
 
-def ranked_block(rows: list[dict], name_key: str) -> str:
+async def period_teams(since: datetime) -> list[dict]:
+    conn = await db()
+    cur = await conn.execute(
+        """
+        SELECT COALESCE(a.team, 'Unassigned') AS team,
+          COALESCE(SUM(CASE WHEN d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS iss
+        FROM deals d
+        LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
+        WHERE d.status IN ('submitted', 'issued')
+        GROUP BY COALESCE(a.team, 'Unassigned')
+        HAVING sub > 0 OR iss > 0
+        ORDER BY iss DESC, sub DESC
+        LIMIT 10
+        """,
+        (since.isoformat(), since.isoformat()),
+    )
+    rows = [dict(r) for r in await cur.fetchall()]
+    await conn.close()
+    return rows
+
+
+async def lifetime_people() -> list[dict]:
+    conn = await db()
+    cur = await conn.execute(
+        """
+        SELECT agent,
+          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued') THEN premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN status = 'issued' THEN premium ELSE 0 END), 0) AS iss
+        FROM deals
+        WHERE status IN ('submitted', 'issued')
+        GROUP BY agent
+        ORDER BY iss DESC, sub DESC
+        """
+    )
+    rows = [dict(r) for r in await cur.fetchall()]
+    await conn.close()
+    return rows
+
+
+async def lifetime_teams() -> list[dict]:
+    conn = await db()
+    cur = await conn.execute(
+        """
+        SELECT COALESCE(a.team, 'Unassigned') AS team,
+          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued') THEN d.premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN d.status = 'issued' THEN d.premium ELSE 0 END), 0) AS iss
+        FROM deals d
+        LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
+        WHERE d.status IN ('submitted', 'issued')
+        GROUP BY COALESCE(a.team, 'Unassigned')
+        ORDER BY iss DESC, sub DESC
+        """
+    )
+    rows = [dict(r) for r in await cur.fetchall()]
+    await conn.close()
+    return rows
+
+
+def chunk_rank(rows: list[dict], key: str, size: int = 10) -> list[str]:
     if not rows:
-        return "No production yet"
-    out = []
-    for i, r in enumerate(rows[:10], start=1):
-        medal = MEDALS.get(i, f"`{i}`")
-        out.append(
-            f"{medal}  **{r[name_key]}**\n"
-            f"Day  {money_pair(r['d_sub'], r['d_iss'])}\n"
-            f"Week  {money_pair(r['w_sub'], r['w_iss'])}\n"
-            f"Month  {money_pair(r['m_sub'], r['m_iss'])}"
-        )
-    return "\n".join(out)
+        return ["No production yet"]
+    blocks = []
+    for start in range(0, len(rows), size):
+        chunk = rows[start:start + size]
+        lines = []
+        for i, r in enumerate(chunk, start=start + 1):
+            lines.append(f"`{i}`  **{r[key]}**\n{money(r['sub'])} sub  ·  {money(r['iss'])} iss")
+        blocks.append("\n".join(lines))
+    return blocks
 
 
-async def build_embed() -> discord.Embed:
+def company_block(row: dict) -> str:
+    return f"Submitted  {money(row['submitted_prem'] or 0)}\nIssued  {money(row['issued_prem'] or 0)}"
+
+
+async def build_boards() -> dict[str, discord.Embed]:
     current = now()
     day = current.replace(hour=0, minute=0, second=0, microsecond=0)
-    start = week_start(current)
+    week = week_start(current)
     month = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    day_t = await totals(day)
-    week = await totals(start)
-    mo = await totals(month)
-    people = await producers(day, start, month)
-    team_rows = await teams(day, start, month)
-    embed = discord.Embed(
-        title="SILVERTHORNE LEADERBOARDS",
-        description="Silverthorne Financial Group",
+    year = current.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    windows = {
+        "day": (day, "DAILY LEADERBOARD", day.strftime("%b %-d")),
+        "week": (week, "WEEKLY LEADERBOARD", f"week of {week.strftime('%b %-d')}"),
+        "month": (month, "MONTHLY LEADERBOARD", month.strftime("%B %Y")),
+        "year": (year, "YEAR LEADERBOARD", str(year.year)),
+    }
+    totals_by = {}
+    people_by = {}
+    teams_by = {}
+    boards = {}
+    for key, (since, title, label) in windows.items():
+        totals_by[key] = await totals(since)
+        people_by[key] = await period_people(since)
+        teams_by[key] = await period_teams(since)
+        embed = discord.Embed(title=title, description=label, color=GOLD, timestamp=current)
+        embed.add_field(name="SILVERTHORNE", value=company_block(totals_by[key]), inline=False)
+        embed.add_field(name="TOP 10 PRODUCERS", value=chunk_rank(people_by[key], "agent")[0], inline=False)
+        embed.add_field(name="TOP 10 TEAMS", value=chunk_rank(teams_by[key], "team")[0], inline=False)
+        embed.set_footer(text="Updates with every sale  ·  source GoHighLevel")
+        boards[key] = embed
+
+    people_life = await lifetime_people()
+    teams_life = await lifetime_teams()
+    master = discord.Embed(
+        title="MASTER LEADERBOARD",
+        description="Silverthorne Financial Group  ·  lifetime  ·  updates with every sale",
         color=GOLD,
         timestamp=current,
     )
-    embed.add_field(name="SILVERTHORNE  ·  all teams", value="\n\n".join([
-        window_block("Day", day_t),
-        window_block("Week", week),
-        window_block("Month", mo),
-    ]), inline=False)
-    embed.add_field(name="TOP 10 PRODUCERS", value=ranked_block(people, "agent"), inline=False)
-    embed.add_field(name="TOP 10 TEAMS", value=ranked_block(team_rows, "team"), inline=False)
-    embed.set_footer(text="Submitted and issued are separate  ·  source GoHighLevel")
-    embed.set_image(url="attachment://banner.jpg")
-    return embed
+    master.add_field(name="DAY", value=company_block(totals_by["day"]), inline=True)
+    master.add_field(name="WEEK", value=company_block(totals_by["week"]), inline=True)
+    master.add_field(name="MONTH", value=company_block(totals_by["month"]), inline=True)
+    master.add_field(name="YEAR", value=company_block(totals_by["year"]), inline=True)
+    for i, block in enumerate(chunk_rank(people_life, "agent"), start=1):
+        master.add_field(name="EVERY ACTIVE AGENT  ·  lifetime" if i == 1 else "AGENTS  ·  continued", value=block, inline=False)
+    for i, block in enumerate(chunk_rank(teams_life, "team"), start=1):
+        master.add_field(name="EVERY TEAM  ·  lifetime" if i == 1 else "TEAMS  ·  continued", value=block, inline=False)
+    master.set_footer(text="Master stays pinned  ·  every agent and team, lifetime")
+    master.set_image(url="attachment://banner.jpg")
+    boards["master"] = master
+    return boards
+
+
+BOARD_ORDER = ("day", "week", "month", "year", "master")
 
 
 async def push_board() -> None:
@@ -389,30 +485,36 @@ async def push_board() -> None:
         return
     channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
     async with board_lock:
+        boards = await build_boards()
         conn = await db()
-        cur = await conn.execute("SELECT value FROM meta WHERE key = 'board_message_id'")
-        row = await cur.fetchone()
-        await conn.close()
-        embed = await build_embed()
-        file = discord.File("banner.jpg", filename="banner.jpg")
-        if row:
-            try:
-                msg = await channel.fetch_message(int(row["value"]))
-                await msg.edit(embed=embed, attachments=[file])
-                return
-            except discord.NotFound:
-                pass
-        msg = await channel.send(embed=embed, file=file)
-        try:
-            await msg.pin()
-        except discord.HTTPException:
-            pass
-        conn = await db()
-        await conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('board_message_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (str(msg.id),),
-        )
-        await conn.commit()
+        for key in BOARD_ORDER:
+            meta_key = f"board_{key}"
+            cur = await conn.execute("SELECT value FROM meta WHERE key = ?", (meta_key,))
+            row = await cur.fetchone()
+            embed = boards[key]
+            file = discord.File("banner.jpg", filename="banner.jpg") if key == "master" else None
+            msg = None
+            if row:
+                try:
+                    msg = await channel.fetch_message(int(row["value"]))
+                    if file:
+                        await msg.edit(embed=embed, attachments=[file])
+                    else:
+                        await msg.edit(embed=embed)
+                except discord.NotFound:
+                    msg = None
+            if msg is None:
+                msg = await channel.send(embed=embed, file=file) if file else await channel.send(embed=embed)
+                await conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (meta_key, str(msg.id)),
+                )
+                await conn.commit()
+            if key == "master":
+                try:
+                    await msg.pin()
+                except discord.HTTPException:
+                    pass
         await conn.close()
 
 
