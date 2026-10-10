@@ -228,7 +228,92 @@ async def upsert_deal(payload: dict) -> str:
     await conn.commit()
     await conn.close()
     await upsert_agent(payload["agent"], payload.get("ghl_user_id"))
+    await save_ledger()
     return event
+
+
+async def export_deals() -> list[dict]:
+    conn = await db()
+    cur = await conn.execute(
+        "SELECT ghl_id, agent, client, premium, product, carrier, policy_number, status, submitted_at, issued_at, updated_at FROM deals"
+    )
+    rows = [dict(r) for r in await cur.fetchall()]
+    await conn.close()
+    return rows
+
+
+async def import_deals(rows: list[dict]) -> None:
+    if not rows:
+        return
+    conn = await db()
+    for r in rows:
+        await conn.execute(
+            """
+            INSERT INTO deals (ghl_id, agent, client, premium, product, carrier, policy_number, status, submitted_at, issued_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ghl_id) DO UPDATE SET
+                agent = excluded.agent,
+                client = excluded.client,
+                premium = excluded.premium,
+                status = excluded.status,
+                submitted_at = excluded.submitted_at,
+                issued_at = excluded.issued_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                r.get("ghl_id"), r.get("agent"), r.get("client"), r.get("premium") or 0,
+                r.get("product") or "", r.get("carrier") or "", r.get("policy_number"),
+                r.get("status"), r.get("submitted_at"), r.get("issued_at"), r.get("updated_at"),
+            ),
+        )
+        if r.get("agent"):
+            await conn.execute(
+                "INSERT INTO agents (name) VALUES (?) ON CONFLICT(name) DO NOTHING",
+                (r["agent"],),
+            )
+    await conn.commit()
+    await conn.close()
+
+
+async def ledger_message(channel):
+    async for msg in channel.history(limit=50):
+        if msg.author == bot.user and msg.content.startswith("FLOOR-LEDGER"):
+            return msg
+    return None
+
+
+async def save_ledger() -> None:
+    if not CHANNEL_ID or not bot.is_ready():
+        return
+    try:
+        channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+        payload = json.dumps(await export_deals()).encode()
+        msg = await ledger_message(channel)
+        file = discord.File(fp=__import__("io").BytesIO(payload), filename="deals.json")
+        if msg:
+            await msg.edit(content=f"FLOOR-LEDGER {len(payload)}", attachments=[file])
+        else:
+            await channel.send(content="FLOOR-LEDGER", file=file)
+    except Exception as exc:
+        print("ledger save failed", exc)
+
+
+async def restore_ledger() -> None:
+    if not CHANNEL_ID:
+        return
+    existing = await export_deals()
+    if existing:
+        return
+    try:
+        channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+        msg = await ledger_message(channel)
+        if not msg or not msg.attachments:
+            return
+        raw = await msg.attachments[0].read()
+        await import_deals(json.loads(raw.decode()))
+        print("restored", len(json.loads(raw.decode())), "deals")
+    except Exception as exc:
+        print("ledger restore failed", exc)
 
 
 async def ranks(status: str, since: datetime) -> list[dict]:
@@ -908,6 +993,7 @@ async def on_ready() -> None:
         await tree.sync()
     print(f"online as {bot.user}")
     await start_web()
+    await restore_ledger()
     await push_board()
     bot.loop.create_task(loop_sync())
 
@@ -916,3 +1002,4 @@ if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Set DISCORD_TOKEN in .env")
     bot.run(TOKEN)
+
