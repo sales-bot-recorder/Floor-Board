@@ -574,10 +574,12 @@ def dig(obj: dict, *path: str):
 
 def deal_from_ghl(body: dict) -> dict | None:
     opp = body.get("opportunity") or dig(body, "customData", "opportunity") or body
+    custom = body.get("customData") or {}
+    custom_stage = custom.get("stage") or custom.get("Stage") or custom.get("STAGE")
     stage = (
         dig(opp, "pipelineStageName")
         or dig(body, "pipeline_stage")
-        or dig(body, "customData", "stage")
+        or custom_stage
         or body.get("stage")
         or ""
     )
