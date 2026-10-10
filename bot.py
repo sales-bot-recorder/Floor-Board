@@ -96,7 +96,8 @@ async def init_db() -> None:
             name TEXT UNIQUE,
             discord_id TEXT,
             ghl_user_id TEXT,
-            rookie INTEGER DEFAULT 1
+            rookie INTEGER DEFAULT 1,
+            team TEXT DEFAULT 'Unassigned'
         );
         CREATE TABLE IF NOT EXISTS deals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,6 +119,10 @@ async def init_db() -> None:
         );
         """
     )
+    try:
+        await conn.execute("ALTER TABLE agents ADD COLUMN team TEXT DEFAULT 'Unassigned'")
+    except Exception:
+        pass
     await conn.commit()
     await conn.close()
 
@@ -201,7 +206,7 @@ async def upsert_deal(payload: dict) -> str:
 
 async def ranks(status: str, since: datetime) -> list[dict]:
     col = "issued_at" if status == "issued" else "submitted_at"
-    status_sql = "status = 'issued'" if status == "issued" else "status IN ('submitted', 'issued')"
+    status_sql = "status = 'issued'" if status == "issued" else "status = 'submitted'"
     conn = await db()
     cur = await conn.execute(
         f"""
@@ -212,6 +217,63 @@ async def ranks(status: str, since: datetime) -> list[dict]:
         ORDER BY premium DESC, apps DESC
         """,
         (since.isoformat(),),
+    )
+    rows = [dict(r) for r in await cur.fetchall()]
+    await conn.close()
+    return rows
+
+
+async def producers(since_day: datetime, since_week: datetime, since_month: datetime) -> list[dict]:
+    conn = await db()
+    cur = await conn.execute(
+        """
+        SELECT agent,
+          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END), 0) AS d_sub,
+          COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS d_iss,
+          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END), 0) AS w_sub,
+          COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS w_iss,
+          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END), 0) AS m_sub,
+          COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS m_iss
+        FROM deals
+        WHERE status IN ('submitted', 'issued')
+        GROUP BY agent
+        ORDER BY m_iss DESC, m_sub DESC
+        LIMIT 10
+        """,
+        (
+            since_day.isoformat(), since_day.isoformat(),
+            since_week.isoformat(), since_week.isoformat(),
+            since_month.isoformat(), since_month.isoformat(),
+        ),
+    )
+    rows = [dict(r) for r in await cur.fetchall()]
+    await conn.close()
+    return rows
+
+
+async def teams(since_day: datetime, since_week: datetime, since_month: datetime) -> list[dict]:
+    conn = await db()
+    cur = await conn.execute(
+        """
+        SELECT COALESCE(a.team, 'Unassigned') AS team,
+          COALESCE(SUM(CASE WHEN d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS d_sub,
+          COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS d_iss,
+          COALESCE(SUM(CASE WHEN d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS w_sub,
+          COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS w_iss,
+          COALESCE(SUM(CASE WHEN d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS m_sub,
+          COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS m_iss
+        FROM deals d
+        LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
+        WHERE d.status IN ('submitted', 'issued')
+        GROUP BY COALESCE(a.team, 'Unassigned')
+        ORDER BY m_iss DESC, m_sub DESC
+        LIMIT 10
+        """,
+        (
+            since_day.isoformat(), since_day.isoformat(),
+            since_week.isoformat(), since_week.isoformat(),
+            since_month.isoformat(), since_month.isoformat(),
+        ),
     )
     rows = [dict(r) for r in await cur.fetchall()]
     await conn.close()
@@ -267,34 +329,29 @@ async def totals(since: datetime) -> dict:
     return row
 
 
-def lines(rows: list[dict]) -> str:
-    if not rows:
-        return "—\nNo production yet"
-    out = []
-    for i, r in enumerate(rows[:8], start=1):
-        medal = MEDALS.get(i, f"`{i}`")
-        out.append(f"{medal}  **{r['agent']}**\n{money(r['premium'])}  ·  {r['apps']} app{'s' if r['apps'] != 1 else ''}")
-    return "\n".join(out)
+def money_pair(sub: float, iss: float) -> str:
+    return f"{money(sub or 0)} sub  ·  {money(iss or 0)} iss"
 
 
-def window_line(label: str, row: dict) -> str:
-    sub_p = row["submitted_prem"] or 0
-    iss_p = row["issued_prem"] or 0
-    rate = (iss_p / sub_p * 100) if sub_p else 0
-    return f"**{label}**  {money(sub_p)} sub  ·  {money(iss_p)} iss  ·  {rate:.0f}%"
+def window_block(label: str, row: dict) -> str:
+    return (
+        f"**{label}**\n"
+        f"Submitted  {money(row['submitted_prem'] or 0)}\n"
+        f"Issued  {money(row['issued_prem'] or 0)}"
+    )
 
 
-def personal_lines(rows: list[dict]) -> str:
+def ranked_block(rows: list[dict], name_key: str) -> str:
     if not rows:
         return "No production yet"
     out = []
-    for r in rows[:12]:
+    for i, r in enumerate(rows[:10], start=1):
+        medal = MEDALS.get(i, f"`{i}`")
         out.append(
-            f"**{r['agent']}**\n"
-            f"D {money(r['d_sub'] or 0)}/{money(r['d_iss'] or 0)}  ·  "
-            f"W {money(r['w_sub'] or 0)}/{money(r['w_iss'] or 0)}\n"
-            f"M {money(r['m_sub'] or 0)}/{money(r['m_iss'] or 0)}  ·  "
-            f"Y {money(r['y_sub'] or 0)}/{money(r['y_iss'] or 0)}"
+            f"{medal}  **{r[name_key]}**\n"
+            f"Day  {money_pair(r['d_sub'], r['d_iss'])}\n"
+            f"Week  {money_pair(r['w_sub'], r['w_iss'])}\n"
+            f"Month  {money_pair(r['m_sub'], r['m_iss'])}"
         )
     return "\n".join(out)
 
@@ -304,34 +361,25 @@ async def build_embed() -> discord.Embed:
     day = current.replace(hour=0, minute=0, second=0, microsecond=0)
     start = week_start(current)
     month = current.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    year = current.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    submitted = await ranks("submitted", start)
-    issued = await ranks("issued", start)
     day_t = await totals(day)
     week = await totals(start)
     mo = await totals(month)
-    yr = await totals(year)
-    people = await personal(day, start, month, year)
+    people = await producers(day, start, month)
+    team_rows = await teams(day, start, month)
     embed = discord.Embed(
         title="SILVERTHORNE LEADERBOARDS",
-        description=f"Silverthorne Financial Group  ·  week of {start.strftime('%b %-d')}",
+        description="Silverthorne Financial Group",
         color=GOLD,
         timestamp=current,
     )
-    embed.add_field(name="SUBMITTED  ·  this week", value=lines(submitted), inline=True)
-    embed.add_field(name="ISSUED  ·  this week", value=lines(issued), inline=True)
-    embed.add_field(
-        name="TEAM",
-        value="\n".join([
-            window_line("Day", day_t),
-            window_line("Week", week),
-            window_line("Month", mo),
-            window_line("Year", yr),
-        ]),
-        inline=False,
-    )
-    embed.add_field(name="PERSONAL  ·  sub/iss", value=personal_lines(people), inline=False)
-    embed.set_footer(text="Day week month year  ·  source GoHighLevel")
+    embed.add_field(name="SILVERTHORNE  ·  all teams", value="\n\n".join([
+        window_block("Day", day_t),
+        window_block("Week", week),
+        window_block("Month", mo),
+    ]), inline=False)
+    embed.add_field(name="TOP 10 PRODUCERS", value=ranked_block(people, "agent"), inline=False)
+    embed.add_field(name="TOP 10 TEAMS", value=ranked_block(team_rows, "team"), inline=False)
+    embed.set_footer(text="Submitted and issued are separate  ·  source GoHighLevel")
     embed.set_image(url="attachment://banner.jpg")
     return embed
 
@@ -378,6 +426,15 @@ async def agent_mention(name: str) -> str:
     return name or "Unassigned"
 
 
+def short_client(name: str) -> str:
+    parts = [p for p in (name or "").replace(",", " ").split() if p]
+    if not parts:
+        return "Client"
+    if len(parts) == 1:
+        return parts[0]
+    return f"{parts[0]} {parts[-1][0].upper()}."
+
+
 async def announce(event: str, payload: dict) -> None:
     """Ping the floor on a new submitted or issued app. Ignore updates."""
     if event not in {"submitted", "issued"} or not WINS_CHANNEL_ID:
@@ -387,7 +444,7 @@ async def announce(event: str, payload: dict) -> None:
     except discord.HTTPException:
         return
     who = await agent_mention(payload.get("agent") or "Unassigned")
-    client = payload.get("client") or "Client"
+    client = short_client(payload.get("client") or "Client")
     premium = money(float(payload.get("premium") or 0))
     if event == "issued":
         text = f"✅ **ISSUED**  ·  {who}  ·  {client}  ·  {premium}"
@@ -649,7 +706,16 @@ async def cmd_issued(interaction: discord.Interaction, client: str, agent: str) 
     await interaction.response.send_message(f"Issued {client} · {agent}", ephemeral=True)
 
 
-@tree.command(name="link", description="Link a Discord user to a board name so sales ping them")
+@tree.command(name="team", description="Assign a producer to a team")
+@app_commands.describe(name="Producer name on the board", team="Team name")
+async def cmd_team(interaction: discord.Interaction, name: str, team: str) -> None:
+    await upsert_agent(name)
+    conn = await db()
+    await conn.execute("UPDATE agents SET team = ? WHERE lower(name) = lower(?)", (team.strip(), name))
+    await conn.commit()
+    await conn.close()
+    await push_board()
+    await interaction.response.send_message(f"{name} is on {team}.", ephemeral=True)
 @app_commands.describe(
     name="Name exactly as it shows on the board",
     user="The agent. Leave blank to link yourself.",
