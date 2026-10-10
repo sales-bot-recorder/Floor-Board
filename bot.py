@@ -14,6 +14,7 @@ import imaplib
 import json
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from email.header import decode_header
 from zoneinfo import ZoneInfo
@@ -147,14 +148,40 @@ async def upsert_agent(name: str, ghl_user_id: str | None = None, discord_id: st
     await conn.close()
 
 
+def money_value(value) -> float:
+    if value is None:
+        return 0.0
+    text = str(value).replace("$", "").replace(",", "").strip()
+    try:
+        return float(text or 0)
+    except ValueError:
+        return 0.0
+
+
+def stable_id(payload: dict) -> str:
+    if payload.get("ghl_id"):
+        return str(payload["ghl_id"])
+    agent = (payload.get("agent") or "unassigned").strip().lower()
+    client = (payload.get("client") or "client").strip().lower()
+    return f"{agent}|{client}"
+
+
 async def upsert_deal(payload: dict) -> str:
-    """Insert or update a deal. Returns a short event label for the win channel."""
-    ghl_id = payload.get("ghl_id") or f"manual-{payload['agent']}-{payload['client']}-{int(now().timestamp())}"
+    """Insert or update a deal. One card, one row. Returns the event."""
+    ghl_id = stable_id(payload)
     status = payload["status"]
     stamp = now().isoformat()
     conn = await db()
     cur = await conn.execute("SELECT status, submitted_at, issued_at FROM deals WHERE ghl_id = ?", (ghl_id,))
     row = await cur.fetchone()
+    if not row:
+        cur = await conn.execute(
+            "SELECT status, submitted_at, issued_at, ghl_id FROM deals WHERE lower(agent) = lower(?) AND lower(client) = lower(?) ORDER BY updated_at DESC LIMIT 1",
+            (payload.get("agent") or "", payload.get("client") or ""),
+        )
+        row = await cur.fetchone()
+        if row:
+            ghl_id = row["ghl_id"]
     submitted_at = stamp
     issued_at = stamp if status == "issued" else None
     event = "submitted"
@@ -190,7 +217,7 @@ async def upsert_deal(payload: dict) -> str:
             ghl_id,
             payload["agent"],
             payload.get("client") or "Client",
-            float(payload.get("premium") or 0),
+            money_value(payload.get("premium")),
             payload.get("product") or "",
             payload.get("carrier") or "",
             payload.get("policy_number"),
@@ -542,10 +569,17 @@ def short_client(name: str) -> str:
     return f"{parts[0]} {parts[-1][0].upper()}."
 
 
+RECENT_PINGS: dict[str, float] = {}
+
+
 async def announce(event: str, payload: dict) -> None:
-    """Ping the floor on a new submitted or issued app. Ignore updates."""
+    """One ping per action. A repeat drag does not ping again."""
     if event not in {"submitted", "issued"} or not WINS_CHANNEL_ID:
         return
+    key = f"{event}|{(payload.get('agent') or '').lower()}|{(payload.get('client') or '').lower()}"
+    if time.time() - RECENT_PINGS.get(key, 0) < 120:
+        return
+    RECENT_PINGS[key] = time.time()
     try:
         channel = bot.get_channel(WINS_CHANNEL_ID) or await bot.fetch_channel(WINS_CHANNEL_ID)
     except discord.HTTPException:
@@ -577,9 +611,9 @@ def deal_from_ghl(body: dict) -> dict | None:
     custom = body.get("customData") or {}
     custom_stage = custom.get("stage") or custom.get("Stage") or custom.get("STAGE")
     stage = (
-        dig(opp, "pipelineStageName")
+        custom_stage
+        or dig(opp, "pipelineStageName")
         or dig(body, "pipeline_stage")
-        or custom_stage
         or body.get("stage")
         or ""
     )
@@ -753,6 +787,9 @@ async def loop_sync() -> None:
         await asyncio.sleep(POLL_SECONDS)
 
 
+webhook_lock = asyncio.Lock()
+
+
 async def handle_ghl(request: web.Request) -> web.Response:
     if WEBHOOK_SECRET and request.headers.get("X-Webhook-Secret") != WEBHOOK_SECRET:
         print("webhook rejected: bad secret")
@@ -763,9 +800,10 @@ async def handle_ghl(request: web.Request) -> web.Response:
     if not parsed or not parsed.get("agent"):
         print("webhook ignored", body.get("customData"))
         return web.json_response({"ok": False, "reason": "stage not tracked"})
-    event = await upsert_deal(parsed)
-    await announce(event, parsed)
-    await push_board()
+    async with webhook_lock:
+        event = await upsert_deal(parsed)
+        await announce(event, parsed)
+        await push_board()
     return web.json_response({"ok": True, "event": event})
 
 
