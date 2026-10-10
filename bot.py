@@ -159,8 +159,6 @@ def money_value(value) -> float:
 
 
 def stable_id(payload: dict) -> str:
-    if payload.get("ghl_id"):
-        return str(payload["ghl_id"])
     agent = (payload.get("agent") or "unassigned").strip().lower()
     client = (payload.get("client") or "client").strip().lower()
     return f"{agent}|{client}"
@@ -628,7 +626,7 @@ def deal_from_ghl(body: dict) -> dict | None:
         or "Unassigned"
     )
     return {
-        "ghl_id": opp.get("id") or body.get("id") or dig(body, "customData", "opportunity_id"),
+        "ghl_id": dig(body, "customData", "opportunity_id") or dig(opp, "id") if opp is not body else None,
         "agent": agent,
         "ghl_user_id": opp.get("assignedTo") or dig(body, "user", "id"),
         "client": opp.get("name") or dig(opp, "contact", "name") or dig(body, "full_name") or "Client",
@@ -801,9 +799,13 @@ async def handle_ghl(request: web.Request) -> web.Response:
         print("webhook ignored", body.get("customData"))
         return web.json_response({"ok": False, "reason": "stage not tracked"})
     async with webhook_lock:
-        event = await upsert_deal(parsed)
-        await announce(event, parsed)
-        await push_board()
+        try:
+            event = await upsert_deal(parsed)
+            await announce(event, parsed)
+            await push_board()
+        except Exception as exc:
+            print("webhook failed", exc)
+            return web.json_response({"ok": False, "reason": "save failed"}, status=500)
     return web.json_response({"ok": True, "event": event})
 
 
@@ -876,6 +878,9 @@ async def cmd_team(interaction: discord.Interaction, name: str, team: str) -> No
     await conn.close()
     await push_board()
     await interaction.response.send_message(f"{name} is on {team}.", ephemeral=True)
+
+
+@tree.command(name="link", description="Link a Discord user to a board name so sales ping them")
 @app_commands.describe(
     name="Name exactly as it shows on the board",
     user="The agent. Leave blank to link yourself.",
