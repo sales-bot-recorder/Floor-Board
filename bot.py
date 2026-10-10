@@ -228,11 +228,11 @@ async def producers(since_day: datetime, since_week: datetime, since_month: date
     cur = await conn.execute(
         """
         SELECT agent,
-          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END), 0) AS d_sub,
+          COALESCE(SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS d_sub,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS d_iss,
-          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END), 0) AS w_sub,
+          COALESCE(SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS w_sub,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS w_iss,
-          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END), 0) AS m_sub,
+          COALESCE(SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS m_sub,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS m_iss
         FROM deals
         WHERE status IN ('submitted', 'issued')
@@ -256,11 +256,11 @@ async def teams(since_day: datetime, since_week: datetime, since_month: datetime
     cur = await conn.execute(
         """
         SELECT COALESCE(a.team, 'Unassigned') AS team,
-          COALESCE(SUM(CASE WHEN d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS d_sub,
+          COALESCE(SUM(CASE WHEN d.status = 'submitted' AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS d_sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS d_iss,
-          COALESCE(SUM(CASE WHEN d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS w_sub,
+          COALESCE(SUM(CASE WHEN d.status = 'submitted' AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS w_sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS w_iss,
-          COALESCE(SUM(CASE WHEN d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS m_sub,
+          COALESCE(SUM(CASE WHEN d.status = 'submitted' AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS m_sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS m_iss
         FROM deals d
         LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
@@ -285,13 +285,13 @@ async def personal(since_day: datetime, since_week: datetime, since_month: datet
     cur = await conn.execute(
         """
         SELECT agent,
-          SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END) AS d_sub,
+          SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END) AS d_sub,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS d_iss,
-          SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END) AS w_sub,
+          SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END) AS w_sub,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS w_iss,
-          SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END) AS m_sub,
+          SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END) AS m_sub,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS m_iss,
-          SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END) AS y_sub,
+          SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END) AS y_sub,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS y_iss
         FROM deals
         WHERE status IN ('submitted', 'issued')
@@ -315,8 +315,8 @@ async def totals(since: datetime) -> dict:
     cur = await conn.execute(
         """
         SELECT
-          SUM(CASE WHEN submitted_at >= ? THEN 1 ELSE 0 END) AS submitted_apps,
-          SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END) AS submitted_prem,
+          SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN 1 ELSE 0 END) AS submitted_apps,
+          SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END) AS submitted_prem,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN 1 ELSE 0 END) AS issued_apps,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS issued_prem
         FROM deals
@@ -334,9 +334,9 @@ async def period_people(since: datetime) -> list[dict]:
     cur = await conn.execute(
         """
         SELECT agent,
-          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS sub,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS iss,
-          COALESCE(SUM(CASE WHEN submitted_at >= ? THEN 1 ELSE 0 END), 0) AS sub_apps,
+          COALESCE(SUM(CASE WHEN status = 'submitted' AND submitted_at >= ? THEN 1 ELSE 0 END), 0) AS sub_apps,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN 1 ELSE 0 END), 0) AS iss_apps
         FROM deals
         WHERE status IN ('submitted', 'issued')
@@ -357,7 +357,7 @@ async def period_teams(since: datetime) -> list[dict]:
     cur = await conn.execute(
         """
         SELECT COALESCE(a.team, 'Unassigned') AS team,
-          COALESCE(SUM(CASE WHEN d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN d.status = 'submitted' AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS iss
         FROM deals d
         LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
@@ -379,7 +379,7 @@ async def lifetime_people() -> list[dict]:
     cur = await conn.execute(
         """
         SELECT agent,
-          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued') THEN premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN status = 'submitted' THEN premium ELSE 0 END), 0) AS sub,
           COALESCE(SUM(CASE WHEN status = 'issued' THEN premium ELSE 0 END), 0) AS iss
         FROM deals
         WHERE status IN ('submitted', 'issued')
@@ -397,7 +397,7 @@ async def lifetime_teams() -> list[dict]:
     cur = await conn.execute(
         """
         SELECT COALESCE(a.team, 'Unassigned') AS team,
-          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued') THEN d.premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN d.status = 'submitted' THEN d.premium ELSE 0 END), 0) AS sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' THEN d.premium ELSE 0 END), 0) AS iss
         FROM deals d
         LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
