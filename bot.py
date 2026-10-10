@@ -808,6 +808,16 @@ async def cmd_issued(interaction: discord.Interaction, client: str, agent: str) 
     await interaction.response.send_message(f"Issued {client} · {agent}", ephemeral=True)
 
 
+@tree.command(name="reset", description="Clear all production and start the boards at zero")
+async def cmd_reset(interaction: discord.Interaction) -> None:
+    conn = await db()
+    await conn.execute("DELETE FROM deals")
+    await conn.commit()
+    await conn.close()
+    await push_board()
+    await interaction.response.send_message("Boards reset to zero.", ephemeral=True)
+
+
 @tree.command(name="team", description="Assign a producer to a team")
 @app_commands.describe(name="Producer name on the board", team="Team name")
 async def cmd_team(interaction: discord.Interaction, name: str, team: str) -> None:
