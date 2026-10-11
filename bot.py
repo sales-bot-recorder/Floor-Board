@@ -87,6 +87,8 @@ def stage_of(name: str) -> str | None:
 async def db() -> aiosqlite.Connection:
     conn = await aiosqlite.connect(DB)
     conn.row_factory = aiosqlite.Row
+    await conn.execute("PRAGMA journal_mode=WAL")
+    await conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -159,9 +161,12 @@ def money_value(value) -> float:
 
 
 def stable_id(payload: dict) -> str:
+    if payload.get("ghl_id"):
+        return str(payload["ghl_id"])
     agent = (payload.get("agent") or "unassigned").strip().lower()
     client = (payload.get("client") or "client").strip().lower()
-    return f"{agent}|{client}"
+    premium = f"{money_value(payload.get('premium')):.2f}"
+    return f"{agent}|{client}|{premium}"
 
 
 async def upsert_deal(payload: dict) -> str:
@@ -275,12 +280,59 @@ async def import_deals(rows: list[dict]) -> None:
     await conn.close()
 
 
+ALLOW_ZERO = False
+LEDGER_FILE = os.getenv("LEDGER_PATH", DB + ".json")
+
+
 async def save_ledger() -> None:
-    return
+    rows = await export_deals()
+    try:
+        os.makedirs(os.path.dirname(LEDGER_FILE) or ".", exist_ok=True)
+        with open(LEDGER_FILE, "w") as f:
+            json.dump(rows, f)
+    except Exception as exc:
+        print("ledger file failed", exc)
+    if not CHANNEL_ID or not bot.is_ready():
+        return
+    try:
+        channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+        thread = discord.utils.get(channel.threads, name="ledger")
+        if thread is None:
+            thread = await channel.create_thread(name="ledger", type=discord.ChannelType.private_thread, invitable=False)
+        payload = json.dumps(rows).encode()
+        file = discord.File(fp=__import__("io").BytesIO(payload), filename="deals.json")
+        async for msg in thread.history(limit=5):
+            if msg.author == bot.user:
+                await msg.edit(attachments=[file])
+                return
+        await thread.send(file=file)
+    except Exception as exc:
+        print("ledger thread failed", exc)
 
 
 async def restore_ledger() -> None:
-    return
+    rows = []
+    if os.path.exists(LEDGER_FILE):
+        try:
+            with open(LEDGER_FILE) as f:
+                rows = json.load(f)
+        except Exception as exc:
+            print("ledger read failed", exc)
+    if not rows and CHANNEL_ID and bot.is_ready():
+        try:
+            channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+            thread = discord.utils.get(channel.threads, name="ledger")
+            if thread:
+                async for msg in thread.history(limit=5):
+                    if msg.author == bot.user and msg.attachments:
+                        raw = await msg.attachments[0].read()
+                        rows = json.loads(raw.decode())
+                        break
+        except Exception as exc:
+            print("ledger thread read failed", exc)
+    if rows:
+        await import_deals(rows)
+        print("merged", len(rows), "deals")
 
 
 async def ranks(status: str, since: datetime) -> list[dict]:
@@ -307,14 +359,14 @@ async def producers(since_day: datetime, since_week: datetime, since_month: date
     cur = await conn.execute(
         """
         SELECT agent,
-          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS d_sub,
+          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS d_sub,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS d_iss,
-          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS w_sub,
+          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS w_sub,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS w_iss,
-          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS m_sub,
+          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS m_sub,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS m_iss
         FROM deals
-        WHERE status IN ('submitted', 'issued')
+        WHERE status IN ('submitted', 'issued', 'not_taken', 'chargeback')
         GROUP BY agent
         ORDER BY m_iss DESC, m_sub DESC
         LIMIT 10
@@ -335,15 +387,15 @@ async def teams(since_day: datetime, since_week: datetime, since_month: datetime
     cur = await conn.execute(
         """
         SELECT COALESCE(a.team, 'Unassigned') AS team,
-          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued') AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS d_sub,
+          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS d_sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS d_iss,
-          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued') AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS w_sub,
+          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS w_sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS w_iss,
-          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued') AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS m_sub,
+          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS m_sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS m_iss
         FROM deals d
         LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
-        WHERE d.status IN ('submitted', 'issued')
+        WHERE d.status IN ('submitted', 'issued', 'not_taken', 'chargeback')
         GROUP BY COALESCE(a.team, 'Unassigned')
         ORDER BY m_iss DESC, m_sub DESC
         LIMIT 10
@@ -364,16 +416,16 @@ async def personal(since_day: datetime, since_week: datetime, since_month: datet
     cur = await conn.execute(
         """
         SELECT agent,
-          SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END) AS d_sub,
+          SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END) AS d_sub,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS d_iss,
-          SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END) AS w_sub,
+          SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END) AS w_sub,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS w_iss,
-          SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END) AS m_sub,
+          SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END) AS m_sub,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS m_iss,
-          SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END) AS y_sub,
+          SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END) AS y_sub,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS y_iss
         FROM deals
-        WHERE status IN ('submitted', 'issued')
+        WHERE status IN ('submitted', 'issued', 'not_taken', 'chargeback')
         GROUP BY agent
         ORDER BY y_iss DESC, y_sub DESC
         """,
@@ -394,12 +446,12 @@ async def totals(since: datetime) -> dict:
     cur = await conn.execute(
         """
         SELECT
-          SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN 1 ELSE 0 END) AS submitted_apps,
-          SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END) AS submitted_prem,
+          SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN 1 ELSE 0 END) AS submitted_apps,
+          SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END) AS submitted_prem,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN 1 ELSE 0 END) AS issued_apps,
           SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END) AS issued_prem
         FROM deals
-        WHERE status IN ('submitted', 'issued')
+        WHERE status IN ('submitted', 'issued', 'not_taken', 'chargeback')
         """,
         (since.isoformat(), since.isoformat(), since.isoformat(), since.isoformat()),
     )
@@ -413,12 +465,12 @@ async def period_people(since: datetime) -> list[dict]:
     cur = await conn.execute(
         """
         SELECT agent,
-          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN premium ELSE 0 END), 0) AS sub,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN premium ELSE 0 END), 0) AS iss,
-          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued') AND submitted_at >= ? THEN 1 ELSE 0 END), 0) AS sub_apps,
+          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND submitted_at >= ? THEN 1 ELSE 0 END), 0) AS sub_apps,
           COALESCE(SUM(CASE WHEN status = 'issued' AND issued_at >= ? THEN 1 ELSE 0 END), 0) AS iss_apps
         FROM deals
-        WHERE status IN ('submitted', 'issued')
+        WHERE status IN ('submitted', 'issued', 'not_taken', 'chargeback')
         GROUP BY agent
         HAVING sub > 0 OR iss > 0
         ORDER BY iss DESC, sub DESC
@@ -436,11 +488,11 @@ async def period_teams(since: datetime) -> list[dict]:
     cur = await conn.execute(
         """
         SELECT COALESCE(a.team, 'Unassigned') AS team,
-          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued') AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued', 'not_taken', 'chargeback') AND d.submitted_at >= ? THEN d.premium ELSE 0 END), 0) AS sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' AND d.issued_at >= ? THEN d.premium ELSE 0 END), 0) AS iss
         FROM deals d
         LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
-        WHERE d.status IN ('submitted', 'issued')
+        WHERE d.status IN ('submitted', 'issued', 'not_taken', 'chargeback')
         GROUP BY COALESCE(a.team, 'Unassigned')
         HAVING sub > 0 OR iss > 0
         ORDER BY iss DESC, sub DESC
@@ -458,10 +510,10 @@ async def lifetime_people() -> list[dict]:
     cur = await conn.execute(
         """
         SELECT agent,
-          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued') THEN premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN status IN ('submitted', 'issued', 'not_taken', 'chargeback') THEN premium ELSE 0 END), 0) AS sub,
           COALESCE(SUM(CASE WHEN status = 'issued' THEN premium ELSE 0 END), 0) AS iss
         FROM deals
-        WHERE status IN ('submitted', 'issued')
+        WHERE status IN ('submitted', 'issued', 'not_taken', 'chargeback')
         GROUP BY agent
         ORDER BY iss DESC, sub DESC
         """
@@ -476,11 +528,11 @@ async def lifetime_teams() -> list[dict]:
     cur = await conn.execute(
         """
         SELECT COALESCE(a.team, 'Unassigned') AS team,
-          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued') THEN d.premium ELSE 0 END), 0) AS sub,
+          COALESCE(SUM(CASE WHEN d.status IN ('submitted', 'issued', 'not_taken', 'chargeback') THEN d.premium ELSE 0 END), 0) AS sub,
           COALESCE(SUM(CASE WHEN d.status = 'issued' THEN d.premium ELSE 0 END), 0) AS iss
         FROM deals d
         LEFT JOIN agents a ON lower(a.name) = lower(d.agent)
-        WHERE d.status IN ('submitted', 'issued')
+        WHERE d.status IN ('submitted', 'issued', 'not_taken', 'chargeback')
         GROUP BY COALESCE(a.team, 'Unassigned')
         ORDER BY iss DESC, sub DESC
         """
@@ -559,10 +611,29 @@ async def build_boards() -> dict[str, discord.Embed]:
 BOARD_ORDER = ("day", "week", "month", "year", "master")
 
 
-async def push_board() -> None:
+async def push_board(allow_zero: bool = False) -> None:
     if not CHANNEL_ID:
         return
+    deals = await export_deals()
+    if not deals and not allow_zero and not ALLOW_ZERO:
+        print("skip zero board")
+        return
     channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+    titles = {
+        "day": "DAILY LEADERBOARD",
+        "week": "WEEKLY LEADERBOARD",
+        "month": "MONTHLY LEADERBOARD",
+        "year": "YEAR LEADERBOARD",
+        "master": "MASTER LEADERBOARD",
+    }
+    found = {}
+    async for msg in channel.history(limit=30):
+        if msg.author != bot.user or not msg.embeds:
+            continue
+        title = msg.embeds[0].title or ""
+        for key, label in titles.items():
+            if key not in found and title == label:
+                found[key] = msg
     async with board_lock:
         boards = await build_boards()
         conn = await db()
@@ -572,26 +643,28 @@ async def push_board() -> None:
             row = await cur.fetchone()
             embed = boards[key]
             file = discord.File("banner.jpg", filename="banner.jpg") if key == "master" and os.path.exists("banner.jpg") else None
-            msg = None
-            if row:
+            msg = found.get(key)
+            if msg is None and row:
                 try:
                     msg = await channel.fetch_message(int(row["value"]))
+                except discord.NotFound:
+                    msg = None
+            if msg:
+                try:
                     if file:
                         await msg.edit(embed=embed, attachments=[file])
                     else:
                         await msg.edit(embed=embed)
-                except discord.NotFound:
-                    msg = None
                 except Exception as exc:
                     print("board edit failed", key, exc)
                     msg = None
             if msg is None:
                 msg = await channel.send(embed=embed, file=file) if file else await channel.send(embed=embed)
-                await conn.execute(
-                    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (meta_key, str(msg.id)),
-                )
-                await conn.commit()
+            await conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (meta_key, str(msg.id)),
+            )
+            await conn.commit()
             if key == "master":
                 try:
                     await msg.pin()
@@ -678,7 +751,11 @@ def deal_from_ghl(body: dict) -> dict | None:
         or "Unassigned"
     )
     return {
-        "ghl_id": dig(body, "customData", "opportunity_id") or dig(opp, "id") if opp is not body else None,
+        "ghl_id": (
+            dig(body, "customData", "opportunity_id")
+            or dig(body, "customData", "opportunityId")
+            or (opp.get("id") if opp is not body else None)
+        ),
         "agent": agent,
         "ghl_user_id": opp.get("assignedTo") or dig(body, "user", "id"),
         "client": opp.get("name") or dig(opp, "contact", "name") or dig(body, "full_name") or "Client",
@@ -724,7 +801,6 @@ async def poll_ghl() -> int:
             event = await upsert_deal(parsed)
             if event in {"submitted", "issued"}:
                 changed += 1
-                await announce(event, parsed)
     return changed
 
 
@@ -917,7 +993,11 @@ async def cmd_reset(interaction: discord.Interaction) -> None:
     await conn.execute("DELETE FROM deals")
     await conn.commit()
     await conn.close()
-    await push_board()
+    global ALLOW_ZERO
+    ALLOW_ZERO = True
+    if os.path.exists(LEDGER_FILE):
+        os.remove(LEDGER_FILE)
+    await push_board(allow_zero=True)
     await interaction.response.send_message("Boards reset to zero.", ephemeral=True)
 
 
